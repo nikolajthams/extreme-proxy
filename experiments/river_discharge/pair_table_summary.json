@@ -1,0 +1,20 @@
+{
+  "connected_candidates": 955,
+  "connected_pass": 232,
+  "disconnected_candidates": 5596,
+  "disconnected_pass": 4673,
+  "reject_reasons": {
+    "area ratio too large (upstream gauge negligible)": 653,
+    "pass": 232,
+    "no gauged intervening tributary (Design A impossible)": 54,
+    "overlap 14 y < 20 y": 3,
+    "overlap 15 y < 20 y": 3,
+    "overlap 5 y < 20 y": 2,
+    "area ratio too small (gauges effectively co-located)": 2,
+    "overlap 0 y < 20 y": 2,
+    "overlap 16 y < 20 y": 1,
+    "overlap 13 y < 20 y": 1,
+    "overlap 19 y < 20 y": 1,
+    "overlap 18 y < 20 y": 1
+  }
+}

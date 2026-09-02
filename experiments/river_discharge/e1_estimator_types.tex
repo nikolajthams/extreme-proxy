@@ -1,0 +1,34 @@
+% This file was created with tikzplotly version 0.2.2.
+\pgfplotstableread{
+x ols median trimmed max
+119.21392415232 1.3088030453048787 1.4197530864197532 1.3757796904462436 1.4610389610389611
+127.425809664 1.2958034481513454 1.4044657881145561 1.3523955730210442 1.4610389610389611
+144.98225455104 1.274548467304439 1.3591035107868639 1.3109194043750452 1.4610389610389611
+160.83968864256 1.2800715786841963 1.3587521663778164 1.3171394630476605 1.4610389610389611
+184.62583977984 1.2899634330565408 1.4197530864197532 1.3562427542413442 1.4610389610389611
+206.14664318976 1.2408559178271101 1.3451776649746194 1.2826460774350885 1.4610389610389611
+}\dataA
+
+\begin{tikzpicture}
+
+\definecolor{00cc96}{HTML}{00cc96}
+\definecolor{636efa}{HTML}{636efa}
+\definecolor{EF553B}{HTML}{EF553B}
+\definecolor{ab63fa}{HTML}{ab63fa}
+
+\begin{axis}[
+xmode=log,
+title={F1b estimator types at q\_w 0.75; 03351000->03354000 (WHITE RIVER NEAR NORA, IN -> WHITE RIVER NEAR CENTERTON, IN), n\_events=211, n\_cert<20 omitted; refs: routing target 1.0, area ratio 2.00},
+xlabel=treatment threshold v (m3/s),
+ylabel=beta hat
+]
+\addplot+ [mark=*, solid, color=636efa] table[y=ols] {\dataA};
+\addlegendentry{ols}
+\addplot+ [mark=*, solid, color=EF553B] table[y=median] {\dataA};
+\addlegendentry{median}
+\addplot+ [mark=*, solid, color=00cc96] table[y=trimmed] {\dataA};
+\addlegendentry{trimmed}
+\addplot+ [mark=*, solid, color=ab63fa] table[y=max] {\dataA};
+\addlegendentry{max}
+\end{axis}
+\end{tikzpicture}
