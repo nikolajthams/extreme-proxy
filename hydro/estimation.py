@@ -1,196 +1,137 @@
-"""Thin wrappers that run the certificate estimator on a `Panel` and always
-return the effective certified sample size alongside beta (spec 5.2).
+"""The estimators of the application, all on a panel's daily table.
+
+Certified estimator (the paper's estimation section, via `certification_estimators`):
+  * certified OLS      through-the-origin least squares of Y on T over the
+                       certified days {T > v, P in B}; with one certified
+                       day this is the ratio Y/T at that day (`MAX` is kept
+                       for the tests and the toolbox, not used by the paper)
+Comparison estimators, fit on the whole table:
+  * naive OLS          through-the-origin least squares of Y on T
+  * proximal bridge    the linear two-proxy bridge with P0 treatment-side and
+                       P1 outcome-side (LinearProximal, with intercept)
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
+from graphical_toolbox.models.proximal import LinearProximal
 
-from certification_estimators.certificate import Certificate, QuantileBall, Unrestricted
-from certification_estimators.extensions import (
-    PerVariableQuantileBall,
-    TailCertificateEstimator,
-)
-from hydro.config import CONFIG, HydroConfig
+from certification_estimators.certificate import Certificate, Unrestricted
+from certification_estimators.extensions import PerVariableQuantileBall, TailCertificateEstimator
+from hydro.config import CONFIG
+
+EST = CONFIG.estimator
+OLS, MAX = "ols", "max"
 
 
 @dataclass
 class Fit:
     beta: float | None
     n_cert: int
-    threshold_v: float | None
-    estimator_type: str
-    safeguard: str
-    certification_quantile: float | None
-    safeguard_quantile: float | None
+    v: float          # treatment threshold, m3/s
+    q_t: float | None  # certification quantile behind v, if chosen on the grid
 
 
-def make_safeguard(w_cols: list[str], q: float, kind: str = "per_variable"):
-    """Safeguard set S.
-
-    kind="per_variable": each safeguard gauge below its own q-quantile
-                         (the semantics stated in the paper; see
-                         `PerVariableQuantileBall`).
-    kind="l_infty"/"l1": the existing `QuantileBall`, quantile of the
-                         aggregated norm -- reported as a robustness check.
-    kind="none":         no safeguard at all (ablation A1, tail only).
-    """
-    if kind == "none" or not w_cols:
-        return Unrestricted()
-    if kind == "per_variable":
-        return PerVariableQuantileBall(w_cols, q)
-    return QuantileBall(w_cols, q, kind)  # type: ignore[arg-type]
+def safeguard(p_cols: list[str], q_p: float):
+    """B = {p : |p_j| < Q_{q_p}(|P_j|) for every j}; unrestricted without proxies."""
+    return PerVariableQuantileBall(p_cols, q_p) if p_cols else Unrestricted()
 
 
-def certified_threshold(
-    events: pl.DataFrame, w_cols: list[str], q_x: float, q_w: float, kind: str
-) -> float:
-    """The treatment threshold v implied by a certification quantile.
-
-    Follows the `quantile_certified_subset` convention: the quantile of X is
-    taken on the safeguard-satisfying subsample, not on the full sample.
-    """
-    s = make_safeguard(w_cols, q_w, kind)
-    sub = events.filter(s.is_bounded)
-    if sub.height == 0:
-        return float("nan")
-    return float(sub.select(pl.col("X").abs().quantile(q_x)).item())
+def threshold(events: pl.DataFrame, p_cols: list[str], q_p: float, q_t: float) -> float:
+    """v = the q_t-quantile of T over the safeguard-satisfying events."""
+    sub = events.filter(safeguard(p_cols, q_p).is_bounded)
+    return float(sub["T"].abs().quantile(q_t)) if sub.height else float("nan")
 
 
-def fit_certificate(
-    events: pl.DataFrame,
-    w_cols: list[str],
-    *,
-    estimator_type: str = "ols",
-    certification_quantile: float | None = None,
-    level: float | None = None,
-    safeguard_quantile: float = 0.75,
-    safeguard_kind: str = "per_variable",
-    anchor: str = "X",
-) -> Fit:
-    s = make_safeguard(w_cols, safeguard_quantile, safeguard_kind)
-    est = TailCertificateEstimator(
-        anchor, s, "X", "Y",
-        certification_quantile=certification_quantile,
-        estimator_type=estimator_type,  # type: ignore[arg-type]
-        level=level,
-        trim_fraction=CONFIG.estimator.trim_fraction,
-    )
-    subset = est.certified_subset(events)
-    v = level
-    if v is None:
-        sub = events.filter(s.is_bounded)
-        v = float(sub.select(pl.col(anchor).abs().quantile(certification_quantile)).item()) \
-            if sub.height else float("nan")
-    try:
-        beta = float(est.fit_on_certified_subset(subset))
-    except Exception:
-        beta = None
-    return Fit(
-        beta=beta,
-        n_cert=subset.height,
-        threshold_v=v,
-        estimator_type=estimator_type,
-        safeguard=safeguard_kind if w_cols else "none",
-        certification_quantile=certification_quantile,
-        safeguard_quantile=safeguard_quantile if w_cols else None,
-    )
+def certified_events(events: pl.DataFrame, p_cols: list[str], q_p: float, v: float) -> pl.DataFrame:
+    return Certificate("T", safeguard(p_cols, q_p)).certified_subset(events, v)
 
 
-def certified_events(
-    events: pl.DataFrame, w_cols: list[str], *, certification_quantile=None, level=None,
-    safeguard_quantile: float = 0.75, safeguard_kind: str = "per_variable", anchor: str = "X",
-) -> pl.DataFrame:
-    s = make_safeguard(w_cols, safeguard_quantile, safeguard_kind)
-    cert = Certificate(e=anchor, safeguard=s)
-    if level is not None:
-        return cert.certified_subset(events, level)
-    return cert.quantile_certified_subset(events, certification_quantile)
+def fit_certified(events: pl.DataFrame, p_cols: list[str], q_p: float, v: float,
+                  estimator: str = OLS, q_t: float | None = None) -> Fit:
+    est = TailCertificateEstimator("T", safeguard(p_cols, q_p), "T", "Y", level=v, estimator_type=estimator)
+    sub = est.certified_subset(events)
+    beta = float(est.fit_on_certified_subset(sub)) if sub.height else None
+    return Fit(beta=beta if beta is not None and np.isfinite(beta) else None, n_cert=sub.height, v=v, q_t=q_t)
 
 
-# --------------------------------------------------------------- diagnostics
+def operating_point(events: pl.DataFrame, p_cols: list[str], q_p: float,
+                    min_events: int = EST.min_events, grid: tuple[float, ...] = EST.q_t_grid
+                    ) -> tuple[float, float] | None:
+    """(q_t, v): the largest q_t on the grid whose certified sample keeps at
+    least `min_events` observations, or None if none does."""
+    best = None
+    for q_t in grid:
+        v = threshold(events, p_cols, q_p, q_t)
+        if np.isfinite(v) and certified_events(events, p_cols, q_p, v).height >= min_events:
+            best = (q_t, v)
+    return best
 
 
-def bias_decomposition(events: pl.DataFrame, w_cols: list[str]) -> dict[str, float]:
-    """Split a through-the-origin slope of Y on X into what the safeguard sees.
-
-    Water is conserved, so Y = X + sum(W) + U with U the inflow the safeguard
-    gauges do not measure (other tributaries, ungauged area, timing). For the
-    through-the-origin slope this is an identity, not a model:
-
-        <X, Y>/<X, X> = 1 + <X, sum W>/<X, X> + <X, U>/<X, X>
-                      = 1 + b_W + b_U.
-
-    b_W is the part of the naive bias carried by the gauged tributaries, b_U the
-    part they do not see. Evaluated on a certified subset it says which part
-    the certificate removed. With a pure-proxy safeguard (gauges that feed
-    neither X nor Y) the split is not a water balance and only `beta` is
-    meaningful; callers should not report b_W then.
-    """
-    x = events["X"].to_numpy()
-    y = events["Y"].to_numpy()
-    sw = events.select(w_cols).to_numpy().sum(axis=1) if w_cols else np.zeros_like(x)
-    xx = float(x @ x)
-    b_w = float(x @ sw) / xx
-    b_u = float(x @ (y - x - sw)) / xx
-    return {"beta": 1.0 + b_w + b_u, "b_W": b_w, "b_U": b_u}
+def fit_at_operating_point(events: pl.DataFrame, p_cols: list[str], q_p: float,
+                           estimator: str = OLS) -> Fit | None:
+    op = operating_point(events, p_cols, q_p)
+    if op is None:
+        return None
+    q_t, v = op
+    return fit_certified(events, p_cols, q_p, v, estimator, q_t=q_t)
 
 
-def hill_estimate(x: np.ndarray, k: int | None = None,
-                  cfg: HydroConfig = CONFIG) -> tuple[float, int]:
-    """Hill estimate of the tail index alpha of a positive sample."""
+# -------------------------------------------------------------- comparisons
+
+
+def naive_ols(df: pl.DataFrame) -> float | None:
+    # np.sum (pairwise, single-threaded) rather than a BLAS dot product, whose
+    # reduction order can vary between runs on long daily tables.
+    t, y = df["T"].to_numpy(), df["Y"].to_numpy()
+    den = float(np.sum(t * t))
+    return float(np.sum(t * y)) / den if den > 0 else None
+
+
+def proximal_bridge(df: pl.DataFrame, p_cols: list[str]) -> float | None:
+    if len(p_cols) < 2:
+        return None
+    b = LinearProximal("T", "Y", p_cols[0], p_cols[1]).fit_or_null(df)
+    if b is None:
+        return None
+    b = float(np.asarray(b).flatten()[0])
+    return b if np.isfinite(b) else None
+
+
+# -------------------------------------------------------------- diagnostics
+
+
+def hill_estimate(x: np.ndarray, k: int | None = None) -> float:
+    """Hill estimate of the tail index of a positive sample."""
     x = np.sort(x[np.isfinite(x) & (x > 0)])[::-1]
     n = x.size
     if n < 20:
-        return (float("nan"), 0)
+        return float("nan")
     if k is None:
-        k = max(10, int(cfg.uncertainty.hill_k_fraction * n))
+        k = max(10, int(EST.hill_k_fraction * n))
     k = min(k, n - 1)
-    alpha = 1.0 / np.mean(np.log(x[:k]) - np.log(x[k]))
-    return (float(alpha), int(k))
+    return float(1.0 / np.mean(np.log(x[:k]) - np.log(x[k])))
 
 
-def hill_path(x: np.ndarray, ks: list[int]) -> list[tuple[int, float]]:
-    return [(k, hill_estimate(x, k)[0]) for k in ks]
-
-
-def year_bootstrap_interval(
-    events: pl.DataFrame,
-    fit_fn,
-    *,
-    n_boot: int | None = None,
-    level: float | None = None,
-    seed: int | None = None,
-) -> tuple[float | None, float | None, int]:
-    """Year-level bootstrap (spec 6.4 option 3).
-
-    Whole hydrological years are resampled with replacement, which respects
-    within-year serial dependence while staying transparent. This is the ONLY
-    interval we report: subsampling and the stationary block bootstrap were cut
-    for time, and the interval should be read as indicative, not as a
-    calibrated confidence statement under infinite variance.
-    """
-    cfg = CONFIG.uncertainty
-    n_boot = n_boot or cfg.n_bootstrap
-    level = level or cfg.level
-    rng = np.random.default_rng(cfg.seed if seed is None else seed)
-
-    years = events["year"].unique().sort().to_list()
+def year_bootstrap_interval(table: pl.DataFrame, fit_fn, *, seed: int | None = None
+                            ) -> tuple[float | None, float | None, int]:
+    """Percentile interval from resampling whole years with replacement; the
+    only interval reported, indicative rather than calibrated at five events."""
+    rng = np.random.default_rng(EST.seed if seed is None else seed)
+    years = table["year"].unique().sort().to_list()
     if len(years) < 5:
         return (None, None, 0)
-    by_year = {y: events.filter(pl.col("year") == y) for y in years}
-
-    draws: list[float] = []
-    for _ in range(n_boot):
+    by_year = {yr: table.filter(pl.col("year") == yr) for yr in years}
+    draws = []
+    for _ in range(EST.n_bootstrap):
         pick = rng.choice(len(years), size=len(years), replace=True)
-        sample = pl.concat([by_year[years[i]] for i in pick])
-        b = fit_fn(sample)
+        b = fit_fn(pl.concat([by_year[years[i]] for i in pick]))
         if b is not None and np.isfinite(b):
             draws.append(float(b))
     if len(draws) < 20:
         return (None, None, len(draws))
-    a = (1 - level) / 2
+    a = (1 - EST.interval_level) / 2
     return (float(np.quantile(draws, a)), float(np.quantile(draws, 1 - a)), len(draws))

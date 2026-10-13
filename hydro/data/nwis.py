@@ -1,8 +1,7 @@
 """USGS NWIS loaders: site metadata, series catalogue, daily discharge.
 
 All outputs are polars frames cached as parquet under `hydro/cache/`.
-Discharge is converted to m3/s at load time (spec 5.4: work on the original
-physical scale, never logged, never standardised).
+Discharge is converted to m3/s at load time.
 """
 
 from __future__ import annotations
@@ -154,6 +153,3 @@ def daily_discharge(site: str, start: str, end: str, *, refresh: bool = False) -
     df.write_parquet(path)
     return df
 
-
-def daily_discharge_many(sites: list[str], start: str, end: str) -> dict[str, pl.DataFrame]:
-    return {s: daily_discharge(s, start, end) for s in sorted(set(sites))}

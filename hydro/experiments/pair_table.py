@@ -1,78 +1,66 @@
-"""The per-pair table of the Application appendix, generated from the persisted
-parquets so that no number is typed by hand.
+"""The per-pair table of the appendix, from all_pairs.parquet, written into
+the notes as app_pairs_table.tex.
 
-`uv run python -m hydro.experiments.pair_table`  ->  ../notes/sections/Appendices/app_pairs_table.tex
+    uv run python -m hydro.experiments.pair_table
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import re
 
 import polars as pl
 
-from hydro.config import OUTPUT_DIR, REPO_ROOT
-from hydro.experiments.decomposition import FALLBACK_Q_W, TABULATED_Q_W
-from hydro.experiments.paper_figures import town
+from hydro.config import CONFIG, NOTES_TABLE_DIR, OUTPUT_DIR, REGION_BY_NAME
 
-OUT = REPO_ROOT.parent / "notes" / "sections" / "Appendices" / "app_pairs_table.tex"
-BASIN = {"susquehanna": "Susq.", "wabash": "Wabash", "iowa_cedar": "Iowa/Cedar"}
+EST = CONFIG.estimator
+HEADER = (r"Pair & Basin & days & $A_Y/A_T$ & naive OLS & cert.\ OLS ($n$, $q_T$) & bridge $(P_1,P_2)$ \\")
 
 
-def _f(x, nd=2) -> str:
+def town(name: str) -> str:
+    """'Susquehanna River at Danville, PA' -> 'Danville'."""
+    part = re.split(r"\s+(?:at|near|nr|AT|NEAR|NR)\s+", name)[-1]
+    part = re.sub(r"[,.]?\s*(PA|NY|IN|IL|IA|MD|IND)\.?\s*$", "", part.strip())
+    return part.strip(" ,").title()
+
+
+def _f(x, nd: int = 2) -> str:
     return "--" if x is None else f"${x:.{nd}f}$"
 
 
 def main() -> None:
-    d = pl.read_parquet(OUTPUT_DIR / "decomposition.parquet")
+    d = pl.read_parquet(OUTPUT_DIR / "all_pairs.parquet")
 
-    def arm(structure, method, q_w=None, cols=("beta",)):
-        f = (pl.col("structure") == structure) & (pl.col("method") == method)
-        if q_w is not None:
-            f = f & (pl.col("safeguard_quantile") == q_w)
+    def col(method, q_p=None, cols=("beta",)):
+        f = (pl.col("method") == method) & pl.col("beta").is_not_null()
+        if q_p is not None:
+            f = f & (pl.col("q_p") == q_p)
         return d.filter(f).select("pair", *cols)
 
-    base = arm("tributary", "naive OLS", cols=("region", "x_name", "y_name", "n_events", "k",
-                                              "safeguard_area_coverage", "beta", "b_W", "b_R" if "b_R" in d.columns else "b_U"))
-    base = base.rename({"beta": "naive"})
-    joins = [
-        (arm("tributary", "certificate", TABULATED_Q_W, ("beta", "n_cert")), {"beta": "c25", "n_cert": "n25"}),
-        (arm("tributary", "certificate", FALLBACK_Q_W, ("beta", "n_cert")), {"beta": "c5", "n_cert": "n5"}),
-        (arm("tributary", "OLS adjusting for W"), {"beta": "adj"}),
-        (arm("tributary", "OLS subtracting W"), {"beta": "sub"}),
-        (arm("proxy", "certificate", TABULATED_Q_W, ("beta", "n_cert")), {"beta": "p5", "n_cert": "np5"}),
-        (arm("tributary", "certificate minus W", TABULATED_Q_W, ("beta", "n_cert")), {"beta": "m25", "n_cert": "nm25"}),
-        (arm("proxy", "proximal (two proxies)"), {"beta": "bridge"}),
-        (arm("proxy", "proximal (P, W)"), {"beta": "bridge_pw"}),
-        (arm("tributary", "certificate (single max)", TABULATED_Q_W, ("beta", "n_cert")), {"beta": "mx25", "n_cert": "nmx25"}),
-        (arm("proxy", "certificate (single max)", TABULATED_Q_W, ("beta", "n_cert")), {"beta": "px25", "n_cert": "npx25"}),
-    ]
-    for j, names in joins:
+    base = col("naive OLS", cols=("region", "t_name", "y_name", "n_days", "area_ratio", "beta")).rename({"beta": "naive"})
+    base = base.with_columns(pl.col("pair").str.split("->").list.get(0).alias("t"),
+                             pl.col("pair").str.split("->").list.get(1).alias("y"))
+    for j, names in (
+        (col("certified OLS", EST.q_p, ("beta", "n_cert", "q_t")), {"beta": "cert", "n_cert": "n_cert", "q_t": "q_t"}),
+        (col("proximal bridge"), {"beta": "bridge"}),
+    ):
         base = base.join(j.rename(names), on="pair", how="left")
     base = base.sort("naive")
 
-    lines = [
-        r"\begin{tabular}{llrrrrrrrrrrrrrrrr}",
-        r"\toprule",
-        r"Pair & Basin & $n$ & $k$ & cov. & naive & $b_W$ & $b_R$ & cert.\ $0.25$ ($n$) & cert.\ $0.5$ ($n$) & cert.$-W$ $0.25$ ($n$) & adj.\ $W$ & subtr.\ $W$ & cert.\ $P$ $0.25$ ($n$) & max $W$ & max $P$ & br.\ $(P_1,P_2)$ & br.\ $(P,W)$ \\",
-        r"\midrule",
-    ]
-    labels = [f"{town(r['x_name'])} $\\to$ {town(r['y_name'])}" for r in base.iter_rows(named=True)]
-    for r, pair in zip(base.iter_rows(named=True), labels):
-        if labels.count(pair) > 1:  # two White River gauges share a town; see paper_figures._label
-            pair += f" ({r['pair'][:8]})"
-        c5 = f"{_f(r['c5'])} ({r['n5']})" if r["c5"] is not None else "--"
-        c25 = f"{_f(r['c25'])} ({r['n25']})" if r["c25"] is not None else "--"
-        p5 = f"{_f(r['p5'])} ({r['np5']})" if r["p5"] is not None else "--"
-        m25 = f"{_f(r['m25'])} ({r['nm25']})" if r["m25"] is not None else "--"
-        mx = _f(r["mx25"]) if r["mx25"] is not None else "--"
-        px = _f(r["px25"]) if r["px25"] is not None else "--"
-        lines.append(
-            f"{pair} & {BASIN[r['region']]} & {r['n_events']} & {r['k']} & {_f(r['safeguard_area_coverage'])} & "
-            f"{_f(r['naive'])} & {_f(r['b_W'])} & {_f(r['b_U'])} & {c25} & {c5} & {m25} & {_f(r['adj'])} & {_f(r['sub'])} & {p5} & {mx} & {px} & {_f(r['bridge'])} & {_f(r['bridge_pw'])} \\\\"
-        )
-    lines += [r"\bottomrule", r"\end{tabular}"]
-    OUT.write_text("\n".join(lines) + "\n")
-    print(f"wrote {OUT} ({base.height} rows)")
+    rows = base.to_dicts()
+    labels = [f"{town(r['t_name'])} $\\to$ {town(r['y_name'])}" for r in rows]
+    lines = []
+    for r, label in zip(rows, labels):
+        if labels.count(label) > 1:  # two gauges can share a town name: add the site id that differs
+            twins = [o for o, lab in zip(rows, labels) if lab == label and o is not r]
+            label += f" ({r['y'] if all(o['t'] == r['t'] for o in twins) else r['t']})"
+        cert = f"{_f(r['cert'])} ({r['n_cert']}, {r['q_t']})" if r["cert"] is not None else "--"
+        lines.append(f"{label} & {REGION_BY_NAME[r['region']].label} & {r['n_days']} & {_f(r['area_ratio'])} & "
+                     f"{_f(r['naive'])} & {cert} & {_f(r['bridge'])} \\\\")
+    NOTES_TABLE_DIR.mkdir(parents=True, exist_ok=True)
+    body = "\n".join([r"\begin{tabular}{llrrrrr}", r"\toprule", HEADER, r"\midrule",
+                      *lines, r"\bottomrule", r"\end{tabular}"])
+    (NOTES_TABLE_DIR / "app_pairs_table.tex").write_text(body + "\n")
+    print(f"wrote app_pairs_table.tex ({len(lines)} rows)")
 
 
 if __name__ == "__main__":

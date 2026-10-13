@@ -1,7 +1,6 @@
-"""Unit tests required by spec 10: lag estimation, declustering counts,
-safeguard semantics, no-intercept OLS, and the `demean` fix.
-
-Everything here runs on synthetic data; nothing touches the network or cache.
+"""Tests of the river-discharge application: alignment, declustering, the
+safeguard and the estimators on synthetic data, and one reproducibility check
+of the headline pair against the cached USGS data.
 """
 
 from __future__ import annotations
@@ -10,13 +9,14 @@ import numpy as np
 import polars as pl
 import pytest
 
-from certification_estimators.certificate import Certificate, QuantileBall, Unrestricted
-from certification_estimators.certificate_estimator import CertificateEstimator
-from certification_estimators.extensions import PerVariableQuantileBall, TailCertificateEstimator
-from hydro.config import AlignmentConfig
+from certification_estimators.certificate import QuantileBall, Unrestricted
+from certification_estimators.extensions import PerVariableQuantileBall
+from hydro import estimation as est
+from hydro.config import CONFIG, Alignment, OUTPUT_DIR
+from hydro.data.network import Network
 from hydro.preprocess.alignment import estimate_lag
 from hydro.preprocess.decluster import runs_decluster
-from hydro.preprocess.panel import _shift, _window_max
+from hydro.preprocess.panel import _shift
 
 RNG = np.random.default_rng(0)
 
@@ -38,23 +38,22 @@ def test_estimate_lag_recovers_synthetic_shift(true_lag):
     y[true_lag:] = x[: n - true_lag] * 1.3
     y[:true_lag] = x[:true_lag] * 1.3
     y = y + 0.01 * np.exp(RNG.normal(size=n))
-    est = estimate_lag(_dates(n), pl.Series(x), pl.Series(y), AlignmentConfig())
-    assert est.lag_days == true_lag
+    assert estimate_lag(_dates(n), pl.Series(x), pl.Series(y), Alignment()).lag_days == true_lag
 
 
 def test_estimate_lag_flags_implausible_celerity():
     n = 2000
     x = np.exp(RNG.normal(size=n)) + 0.05
     y = np.roll(x, 3) * 1.1
-    # 3 days of travel over 2 km implies ~0.008 m/s, far below the physical band.
-    est = estimate_lag(_dates(n), pl.Series(x), pl.Series(y), AlignmentConfig(), distance_km=2.0)
-    assert est.lag_days == 3 and not est.plausible
+    # 3 days over 2 km is ~0.008 m/s, far below the physical band.
+    e = estimate_lag(_dates(n), pl.Series(x), pl.Series(y), Alignment(), distance_km=2.0)
+    assert e.lag_days == 3 and not e.plausible
 
 
-def test_shift_and_window_max():
+def test_shift():
     a = np.array([1.0, 5.0, 2.0, np.nan, 4.0])
     assert _shift(a, 1)[0] == 5.0 and np.isnan(_shift(a, 1)[-1])
-    assert _window_max(a, 1)[0] == 5.0 and _window_max(a, 1)[3] == 4.0
+    assert _shift(a, -1)[1] == 1.0 and np.isnan(_shift(a, -1)[0])
 
 
 # --------------------------------------------------------------- declustering
@@ -64,33 +63,31 @@ def test_runs_decluster_counts_and_peaks():
     # Two clusters: days 0-2 and days 12-13. With r = 7 the 9-day gap splits
     # them; with r = 14 it does not.
     q = [10.0, 30.0, 12.0] + [1.0] * 9 + [20.0, 40.0]
-    df = pl.DataFrame({"date": _dates(len(q)), "X": q})
-    out7 = runs_decluster(df, "X", 5.0, 7)
-    assert out7.height == 2
-    assert sorted(out7["X"].to_list()) == [30.0, 40.0]
-    assert runs_decluster(df, "X", 5.0, 14).height == 1
-    assert runs_decluster(df, "X", 100.0, 7).height == 0
+    df = pl.DataFrame({"date": _dates(len(q)), "T": q})
+    out7 = runs_decluster(df, "T", 5.0, 7)
+    assert out7.height == 2 and sorted(out7["T"].to_list()) == [30.0, 40.0]
+    assert runs_decluster(df, "T", 5.0, 14).height == 1
+    assert runs_decluster(df, "T", 100.0, 7).height == 0
 
 
 # ------------------------------------------------------------ safeguard sets
 
 
-def test_per_variable_quantile_ball_differs_from_aggregated_l_infty():
-    # W0 is 100x the scale of W1. The aggregated l_infty radius is set by W0, so
-    # QuantileBall leaves W1 unconstrained; PerVariableQuantileBall does not.
-    df = pl.DataFrame({"W0": 100 * RNG.random(500), "W1": RNG.random(500)})
-    agg = df.filter(QuantileBall(["W0", "W1"], 0.5, "l_infty").is_bounded)
-    per = df.filter(PerVariableQuantileBall(["W0", "W1"], 0.5).is_bounded)
-    assert agg["W1"].max() > per["W1"].max()
-    assert per["W0"].max() < df["W0"].quantile(0.5) + 1e-9
-    assert per["W1"].max() < df["W1"].quantile(0.5) + 1e-9
-    # Per-variable is an intersection of half-spaces, so it is the smaller set.
+def test_per_variable_quantile_ball_bounds_each_coordinate():
+    # P0 is 100x the scale of P1: an aggregated l_infty radius is set by P0
+    # and leaves P1 unconstrained; the per-variable ball does not.
+    df = pl.DataFrame({"P0": 100 * RNG.random(500), "P1": RNG.random(500)})
+    agg = df.filter(QuantileBall(["P0", "P1"], 0.5, "l_infty").is_bounded)
+    per = df.filter(PerVariableQuantileBall(["P0", "P1"], 0.5).is_bounded)
+    assert agg["P1"].max() > per["P1"].max()
+    assert per["P0"].max() < df["P0"].quantile(0.5) + 1e-9
+    assert per["P1"].max() < df["P1"].quantile(0.5) + 1e-9
     assert per.height <= agg.height
 
 
 def test_empty_safeguard_is_unrestricted():
-    df = pl.DataFrame({"W0": [1.0, 2.0, 3.0]})
-    assert df.filter(PerVariableQuantileBall([], 0.5).is_bounded).height == 3
+    df = pl.DataFrame({"P0": [1.0, 2.0, 3.0]})
+    assert df.filter(est.safeguard([], 0.5).is_bounded).height == 3
     assert df.filter(Unrestricted().is_bounded).height == 3
 
 
@@ -99,121 +96,88 @@ def test_empty_safeguard_is_unrestricted():
 
 def _toy(n: int = 400) -> pl.DataFrame:
     u = RNG.pareto(2.0, n) + 1
-    w = 0.5 * u + RNG.pareto(3.0, n)
-    x = u + RNG.pareto(3.0, n) + 1
-    return pl.DataFrame({"X": x, "Y": 2.0 * x + u, "W": w})
+    p = 0.5 * u + RNG.pareto(3.0, n)
+    t = u + RNG.pareto(3.0, n) + 1
+    return pl.DataFrame({"T": t, "Y": 2.0 * t + u, "P0": p, "year": np.arange(n) // 20})
 
 
-def test_ols_is_through_the_origin():
-    df = pl.DataFrame({"X": [1.0, 2.0, 3.0], "Y": [3.0, 5.0, 7.0]})  # Y = 2X + 1
-    est = TailCertificateEstimator("X", Unrestricted(), "X", "Y", level=0.0)
-    beta = est.fit_on_certified_subset(df)
-    xs, ys = df["X"].to_numpy(), df["Y"].to_numpy()
-    assert beta == pytest.approx(float(xs @ ys) / float(xs @ xs))
-    assert beta != pytest.approx(2.0)  # an intercept model would return exactly 2
+def test_certified_ols_is_through_the_origin():
+    df = pl.DataFrame({"T": [1.0, 2.0, 3.0], "Y": [3.0, 5.0, 7.0]})  # Y = 2T + 1
+    beta = est.fit_certified(df, [], 0.5, 0.0, est.OLS).beta
+    t, y = df["T"].to_numpy(), df["Y"].to_numpy()
+    assert beta == pytest.approx(float(t @ y) / float(t @ t))
+    assert beta == pytest.approx(est.naive_ols(df))
+    assert beta != pytest.approx(2.0)
 
 
-def test_demean_is_off_by_default_and_changes_the_safeguard():
+def test_certified_maximum_is_the_ratio_at_the_largest_t():
+    df = pl.DataFrame({"T": [1.0, 5.0, 3.0], "Y": [2.0, 15.0, 3.0]})
+    assert est.fit_certified(df, [], 0.5, 0.0, est.MAX).beta == pytest.approx(3.0)
+
+
+def test_threshold_is_taken_on_the_safeguard_satisfying_events():
     df = _toy()
-    safeguard = PerVariableQuantileBall(["W"], 0.5)
-    est = TailCertificateEstimator("X", safeguard, "X", "Y", certification_quantile=0.8)
-    assert est.fit(df) == pytest.approx(est.fit(df, demean=False))
-    # Demeaning sends |W| through zero, so "small |W|" stops meaning "W small":
-    # the certified subsets differ, which is the bug valid_bridge_note.md flags.
-    plain = Certificate("X", safeguard).quantile_certified_subset(df, 0.8)
-    centred = df.with_columns(pl.col(c) - pl.col(c).mean() for c in df.columns)
-    demeaned = Certificate("X", safeguard).quantile_certified_subset(centred, 0.8)
-    assert plain.height != demeaned.height or plain["W"].max() != pytest.approx(
-        demeaned["W"].max() + df["W"].mean()
-    )
-    # The base class must not force demeaning on either entry point.
-    base = CertificateEstimator("X", safeguard, "X", "Y", 0.8)
-    assert base.fit(df) == pytest.approx(base.fit_or_null(df))
+    v = est.threshold(df, ["P0"], 0.5, 0.8)
+    sub = df.filter(pl.col("P0") < df["P0"].quantile(0.5))
+    assert v == pytest.approx(float(sub["T"].quantile(0.8)))
+    cert = est.certified_events(df, ["P0"], 0.5, v)
+    assert cert["T"].min() > v and cert["P0"].max() < df["P0"].quantile(0.5)
 
 
-def test_level_and_quantile_paths_are_exclusive_and_agree():
+def test_operating_point_is_the_largest_quantile_keeping_min_events():
     df = _toy()
-    s = PerVariableQuantileBall(["W"], 0.5)
-    with pytest.raises(ValueError):
-        TailCertificateEstimator("X", s, "X", "Y", certification_quantile=0.8, level=1.0)
-    with pytest.raises(ValueError):
-        TailCertificateEstimator("X", s, "X", "Y")
-    v = df.filter(s.is_bounded).select(pl.col("X").abs().quantile(0.8)).item()
-    a = TailCertificateEstimator("X", s, "X", "Y", certification_quantile=0.8).fit(df)
-    b = TailCertificateEstimator("X", s, "X", "Y", level=v).fit(df)
-    assert a == pytest.approx(b)
-
-
-def test_trimmed_sits_between_median_and_mean_of_ratios():
-    df = _toy()
-    s = Unrestricted()
-    kw = dict(e="X", safeguard=s, x="X", y="Y", level=0.0)
-    r = (df["Y"] / df["X"]).to_numpy()
-    trimmed = TailCertificateEstimator(**kw, estimator_type="trimmed", trim_fraction=0.1).fit(df)
-    med = TailCertificateEstimator(**kw, estimator_type="median").fit(df)
-    assert min(med, float(r.mean())) <= trimmed <= max(med, float(r.mean()))
+    q_t, v = est.operating_point(df, ["P0"], 0.5, 5)
+    assert q_t in CONFIG.estimator.q_t_grid
+    assert est.certified_events(df, ["P0"], 0.5, v).height >= 5
+    higher = [q for q in CONFIG.estimator.q_t_grid if q > q_t]
+    for q in higher:
+        assert est.certified_events(df, ["P0"], 0.5, est.threshold(df, ["P0"], 0.5, q)).height < 5
+    assert est.operating_point(df, ["P0"], 0.5, 10 ** 6) is None
 
 
 def test_safeguard_reduces_confounding_on_synthetic_data():
-    """The certificate must beat the tail-only estimate on data built to confound."""
     df = _toy(4000)
-    v = df["X"].quantile(0.9)
-    cert = TailCertificateEstimator(
-        "X", PerVariableQuantileBall(["W"], 0.3), "X", "Y", level=v
-    ).fit(df)
-    tail_only = TailCertificateEstimator("X", Unrestricted(), "X", "Y", level=v).fit(df)
+    v = df["T"].quantile(0.9)
+    cert = est.fit_certified(df, ["P0"], 0.3, v, est.OLS).beta
+    tail_only = est.fit_certified(df, [], 0.3, v, est.OLS).beta
     assert abs(cert - 2.0) < abs(tail_only - 2.0)
 
 
-# ------------------------------------------------------------ safeguards
+def test_year_bootstrap_is_seeded_and_covers_the_estimate():
+    df = _toy(600)
+    a = est.year_bootstrap_interval(df, est.naive_ols)
+    b = est.year_bootstrap_interval(df, est.naive_ols)
+    assert a == b and a[0] <= est.naive_ols(df) <= a[1]
 
 
-def _toy_network():
-    """X -> Y on a main stem; tributary gauges A (downstream) and A_up (nested
-    above A) join between them; P is on a separate stream."""
-    from hydro.data.network import Network
-
-    upstream = {
-        "X": {"X"},
-        "Y": {"Y", "X", "A", "A_up"},
-        "A": {"A", "A_up"},
-        "A_up": {"A_up"},
-        "P": {"P"},
-    }
-    return Network(upstream=upstream, mainstem={"X", "Y"}, meta=pl.DataFrame())
+# ------------------------------------------------------------------ network
 
 
 def test_drop_nested_keeps_the_downstream_gauge_and_order():
-    from hydro.experiments.candidates import drop_nested
-
-    net = _toy_network()
-    assert drop_nested(["A", "A_up", "P"], net) == ["A", "P"]
-    assert drop_nested(["A_up", "P", "A"], net) == ["P", "A"]
-    assert drop_nested(["P"], net) == ["P"]
-
-
-def test_bias_decomposition_is_an_identity():
-    from hydro.estimation import bias_decomposition
-
-    rng = np.random.default_rng(0)
-    x = rng.pareto(2.0, 500) + 1
-    w = rng.pareto(2.0, 500) + 0.5
-    y = 0.9 * x + w + rng.normal(size=500)
-    df = pl.DataFrame({"X": x, "Y": y, "W0": w})
-    d = bias_decomposition(df, ["W0"])
-    assert d["beta"] == pytest.approx(float(x @ y / (x @ x)))
-    assert d["beta"] == pytest.approx(1 + d["b_W"] + d["b_U"])
-    assert d["b_W"] == pytest.approx(float(x @ w / (x @ x)))
+    # T -> Y on a main stem; A_up is nested above A; P is on a separate stream.
+    net = Network(upstream={"T": {"T"}, "Y": {"Y", "T", "A", "A_up"}, "A": {"A", "A_up"},
+                            "A_up": {"A_up"}, "P": {"P"}}, meta=pl.DataFrame())
+    assert net.drop_nested(["A", "A_up", "P"]) == ["A", "P"]
+    assert net.drop_nested(["A_up", "P", "A"]) == ["P", "A"]
+    assert net.disconnected_from_both("T", "Y") == ["P"]
+    assert net.is_disconnected("A", "P") and not net.is_disconnected("A", "Y")
 
 
-def test_subtracting_w_recovers_beta_when_w_enters_with_coefficient_one():
-    from hydro.baselines import ols_adjusting_for_w, ols_subtracting_w
+# ---------------------------------------------------------- reproducibility
 
-    rng = np.random.default_rng(1)
-    u = rng.pareto(2.5, 4000) + 1
-    x = u + rng.pareto(2.5, 4000)
-    w = u + rng.pareto(2.5, 4000)
-    y = 0.9 * x + w + 0.01 * rng.normal(size=4000)
-    df = pl.DataFrame({"X": x, "Y": y, "W0": w})
-    assert ols_subtracting_w(df, ["W0"]) == pytest.approx(0.9, abs=1e-3)
-    assert ols_adjusting_for_w(df, ["W0"]) == pytest.approx(0.9, abs=1e-2)
+
+@pytest.mark.skipif(not (OUTPUT_DIR / "pairs.parquet").exists(), reason="pipeline outputs not present")
+def test_headline_pair_reproduces_from_the_cache():
+    """The headline pair's panel and naive OLS rebuilt from the cached USGS
+    data equal the persisted values."""
+    from hydro.pairs import headline_pair, panel_for
+
+    row = headline_pair()
+    panel = panel_for(row)
+    assert panel.n_daily == row["n_daily"] and panel.lag.lag_days == row["lag_days"]
+    d = pl.read_parquet(OUTPUT_DIR / "all_pairs.parquet").filter(pl.col("pair") == row["pair"])
+    naive = d.filter(pl.col("method") == "naive OLS")["beta"][0]
+    assert est.naive_ols(panel.daily) == pytest.approx(naive)
+    c = d.filter((pl.col("method") == "certified OLS") & (pl.col("q_p") == CONFIG.estimator.q_p)).row(0, named=True)
+    f = est.fit_at_operating_point(panel.daily, panel.p_cols, CONFIG.estimator.q_p, est.OLS)
+    assert f.n_cert == c["n_cert"] and f.beta == pytest.approx(c["beta"])

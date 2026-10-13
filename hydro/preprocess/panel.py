@@ -1,11 +1,8 @@
-"""Assemble the analysis-ready event table for one station pair.
+"""The analysis table of one pair: aligned daily record and declustered flood events.
 
-Pipeline (all steps in spec 5):
-  season filter -> quality filter -> travel-time alignment -> missing-data drop
-  -> runs declustering on X.
-
-Everything is done on a contiguous daily grid held as numpy arrays, so shifts
-and window maxima are exact and gaps stay gaps (never silently closed).
+season filter -> quality filter -> travel-time alignment of Y -> complete days
+-> runs declustering on T. Everything sits on a contiguous daily grid held as
+numpy arrays, so shifts are exact and gaps stay gaps.
 """
 
 from __future__ import annotations
@@ -25,65 +22,58 @@ DAY = np.timedelta64(1, "D")
 
 @dataclass
 class PairSpec:
-    """A causal design instantiated on the gauge network."""
-
     label: str
     region: Region
-    x: str
+    t: str
     y: str
-    w: list[str] = field(default_factory=list)   # safeguard gauges
-    z: str | None = None                          # instrument (Design B)
-    kind: str = "connected"                       # connected | disconnected | reverse
+    proxies: list[str] = field(default_factory=list)
 
     @property
     def sites(self) -> list[str]:
-        s = [self.x, self.y, *self.w]
-        if self.z:
-            s.append(self.z)
-        return s
+        return [self.t, self.y, *self.proxies]
 
 
 @dataclass
 class Panel:
     spec: PairSpec
-    events: pl.DataFrame           # one row per declustered flood event
-    daily: pl.DataFrame            # aligned daily frame before declustering
-    lag_xy: LagEstimate
-    lag_zx: LagEstimate | None
-    threshold_u: float             # declustering threshold on X (m3/s)
-    w_cols: list[str]
-    n_daily: int
-    n_events: int
-    definition: str
-    run_length_days: int
+    events: pl.DataFrame     # one row per declustered flood event: date, year, T, Y, P0..
+    daily: pl.DataFrame      # every complete aligned in-season day, same columns
+    lag: LagEstimate
+    threshold_u: float       # declustering threshold on T (m3/s)
+    p_cols: list[str]
     dropped_quality: int
+
+    @property
+    def n_events(self) -> int:
+        return self.events.height
+
+    @property
+    def n_daily(self) -> int:
+        return self.daily.height
 
 
 def _grid(site: str, region: Region, cfg: HydroConfig,
           lo: np.datetime64, hi: np.datetime64) -> tuple[np.ndarray, int]:
-    """In-season, quality-filtered daily discharge on a contiguous grid."""
+    """In-season, quality-filtered daily discharge on the grid [lo, hi]."""
     df = nwis.daily_discharge(site, cfg.start_date, cfg.end_date)
     df = df.filter(pl.col("date").dt.month().is_in(list(region.season_months)))
     n = len(np.arange(lo, hi + DAY))
     out = np.full(n, np.nan)
     if df.height == 0:
         return out, 0
-
     bad = pl.lit(False)
     for q in cfg.quality.excluded_qualifiers:
         bad = bad | pl.col("qualifiers").str.split(",").list.contains(q)
     dropped = df.filter(bad).height
     df = df.filter(~bad)
-
-    d = df["date"].to_numpy().astype("datetime64[D]")
-    idx = (d - lo).astype(int)
+    idx = (df["date"].to_numpy().astype("datetime64[D]") - lo).astype(int)
     keep = (idx >= 0) & (idx < n)
     out[idx[keep]] = df["q"].to_numpy()[keep]
     return out, dropped
 
 
 def _shift(a: np.ndarray, k: int) -> np.ndarray:
-    """a shifted so that result[t] = a[t + k]."""
+    """result[t] = a[t + k]."""
     out = np.full_like(a, np.nan)
     if k == 0:
         return a.copy()
@@ -94,132 +84,64 @@ def _shift(a: np.ndarray, k: int) -> np.ndarray:
     return out
 
 
-def _window_max(a: np.ndarray, half: int) -> np.ndarray:
-    """Centred window maximum over +-half days, ignoring nan."""
-    if half <= 0:
-        return a.copy()
-    stack = np.vstack([_shift(a, k) for k in range(-half, half + 1)])
-    with np.errstate(invalid="ignore"):
-        out = np.nanmax(stack, axis=0)
-    out[np.all(np.isnan(stack), axis=0)] = np.nan
-    return out
-
-
-def _common_range(sites: list[str], region: Region, cfg: HydroConfig):
+def _common_range(sites: list[str], cfg: HydroConfig):
     los, his = [], []
     for s in sites:
         df = nwis.daily_discharge(s, cfg.start_date, cfg.end_date)
-        if df.height == 0:
-            continue
-        los.append(df["date"].min())
-        his.append(df["date"].max())
+        if df.height:
+            los.append(df["date"].min())
+            his.append(df["date"].max())
     if not los:
         return None
-    lo = np.datetime64(max(los), "D")
-    hi = np.datetime64(min(his), "D")
+    lo, hi = np.datetime64(max(los), "D"), np.datetime64(min(his), "D")
     return (lo, hi) if hi > lo else None
 
 
-def build_panel(
-    spec: PairSpec,
-    cfg: HydroConfig = CONFIG,
-    *,
-    definition: str | None = None,
-    run_length_days: int | None = None,
-    distance_km: float | None = None,
-    force_lag: int | None = None,
-) -> Panel | None:
-    definition = definition or cfg.alignment.default_definition
-    run_length_days = run_length_days or cfg.decluster.run_length_days
+def build_panel(spec: PairSpec, cfg: HydroConfig = CONFIG, *,
+                distance_km: float | None = None, lag: int | None = None) -> Panel | None:
+    """The panel of a pair, or None if the common record is too short.
 
-    rng = _common_range(spec.sites, spec.region, cfg)
+    Y is read `lag` days after T. By default the lag is estimated from the
+    flood waves (`alignment.estimate_lag`); the placebo passes `lag=0`, since
+    two disconnected gauges have no travel time.
+    """
+    rng = _common_range(spec.sites, cfg)
     if rng is None:
         return None
     lo, hi = rng
     dates = np.arange(lo, hi + DAY)
 
-    grids: dict[str, np.ndarray] = {}
-    dropped = 0
-    for s in set(spec.sites):
-        g, d = _grid(s, spec.region, cfg, lo, hi)
-        grids[s] = g
+    grids, dropped = {}, 0
+    for s in dict.fromkeys(spec.sites):
+        grids[s], d = _grid(s, spec.region, cfg, lo, hi)
         dropped += d
+    gt, gy = grids[spec.t], grids[spec.y]
 
-    gx, gy = grids[spec.x], grids[spec.y]
-
-    # --- travel-time alignment (spec 5.1) -------------------------------
-    both = np.isfinite(gx) & np.isfinite(gy)
+    both = np.isfinite(gt) & np.isfinite(gy)
     if both.sum() < 365:
         return None
-    lag_xy = estimate_lag(
+    lag_est = estimate_lag(
         pl.Series(dates[both].astype("datetime64[ms]")).cast(pl.Date),
-        pl.Series(gx[both]),
-        pl.Series(gy[both]),
-        cfg.alignment,
-        distance_km,
+        pl.Series(gt[both]), pl.Series(gy[both]), cfg.alignment, distance_km,
     )
+    if lag is not None:
+        lag_est = replace(lag_est, lag_days=lag, plausible=True, reason=f"fixed lag {lag}")
 
-    # The lag search runs over non-negative lags only, because water flows
-    # downhill. The reverse-direction placebo (E3) therefore passes the forward
-    # lag with its sign flipped via `force_lag`, so that placebo cannot be won
-    # by leaving the anti-causal direction misaligned (spec 5.1 step 3).
-    if force_lag is not None:
-        lag_xy = replace(lag_xy, lag_days=force_lag, reason=f"forced lag {force_lag}")
-    half = cfg.alignment.window_half_width_days if definition == "window" else 0
-    y_aligned = _shift(_window_max(gy, half), lag_xy.lag_days)
+    cols = {"T": gt, "Y": _shift(gy, lag_est.lag_days)}
+    p_cols = []
+    for i, p in enumerate(spec.proxies):
+        cols[f"P{i}"] = grids[p]
+        p_cols.append(f"P{i}")
 
-    cols: dict[str, np.ndarray] = {"X": gx, "Y": y_aligned}
-    w_cols = []
-    for i, w in enumerate(spec.w):
-        name = f"W{i}"
-        w_cols.append(name)
-        # The safeguard asks whether the intervening catchment was in flood
-        # around the event, so a window maximum is the conservative reading;
-        # with definition="point" it degenerates to the event-day value.
-        cols[name] = _window_max(grids[w], half)
-
-    lag_zx = None
-    if spec.z:
-        gz = grids[spec.z]
-        both_zx = np.isfinite(gz) & np.isfinite(gx)
-        if both_zx.sum() >= 365:
-            lag_zx = estimate_lag(
-                pl.Series(dates[both_zx].astype("datetime64[ms]")).cast(pl.Date),
-                pl.Series(gz[both_zx]),
-                pl.Series(gx[both_zx]),
-                cfg.alignment,
-                None,
-            )
-            # Z is observed lag_zx days before X, so bring it forward.
-            cols["Z"] = _shift(gz, -lag_zx.lag_days)
-        else:
-            cols["Z"] = gz
-
-    stacked = np.vstack(list(cols.values()))
-    complete = np.all(np.isfinite(stacked), axis=0)
-
+    complete = np.all(np.isfinite(np.vstack(list(cols.values()))), axis=0)
     daily = pl.DataFrame(
         {"date": pl.Series(dates[complete].astype("datetime64[ms]")).cast(pl.Date)}
         | {k: v[complete] for k, v in cols.items()}
     ).with_columns(pl.col("date").dt.year().alias("year"))
-
     if daily.height < 365:
         return None
 
-    threshold_u = float(np.quantile(daily["X"].to_numpy(), cfg.decluster.threshold_quantile))
-    events = runs_decluster(daily, "X", threshold_u, run_length_days)
-
-    return Panel(
-        spec=spec,
-        events=events,
-        daily=daily,
-        lag_xy=lag_xy,
-        lag_zx=lag_zx,
-        threshold_u=threshold_u,
-        w_cols=w_cols,
-        n_daily=daily.height,
-        n_events=events.height,
-        definition=definition,
-        run_length_days=run_length_days,
-        dropped_quality=dropped,
-    )
+    threshold_u = float(np.quantile(daily["T"].to_numpy(), cfg.decluster.threshold_quantile))
+    events = runs_decluster(daily, "T", threshold_u, cfg.decluster.run_length_days)
+    return Panel(spec=spec, events=events, daily=daily, lag=lag_est, threshold_u=threshold_u,
+                 p_cols=p_cols, dropped_quality=dropped)

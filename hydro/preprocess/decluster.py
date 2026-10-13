@@ -1,4 +1,4 @@
-"""Spec 5.2: runs declustering.
+"""Runs declustering.
 
 A flood spans several days, so raw daily exceedances are massively serially
 dependent. The consistency condition in the paper concerns the *effective*

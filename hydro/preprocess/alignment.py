@@ -1,4 +1,4 @@
-"""Spec 5.1: travel-time alignment -- the highest-risk preprocessing step.
+"""Travel-time alignment of Y to T.
 
 X and Y see the same flood wave on different days. The lag we want is the
 *flood-wave celerity* lag, not the bulk-flow lag, so the cross-correlation is
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
-from hydro.config import AlignmentConfig
+from hydro.config import Alignment
 
 EPS = 1e-3
 
@@ -42,7 +42,7 @@ def estimate_lag(
     dates: pl.Series,
     x: pl.Series,
     y: pl.Series,
-    cfg: AlignmentConfig,
+    cfg: Alignment,
     distance_km: float | None = None,
 ) -> LagEstimate:
     """Integer lag (days) maximising tail-restricted cross-correlation of log-flow.
@@ -86,7 +86,8 @@ def estimate_lag(
         t_hi = (best_lag + 0.5) * 86400.0
         t_lo = max(best_lag - 0.5, 1 / 24) * 86400.0
         lo, hi = d_m / t_hi, d_m / t_lo
-        if hi < cfg.min_celerity_m_per_s or lo > cfg.max_celerity_m_per_s:
+        c_lo, c_hi = cfg.celerity_m_per_s
+        if hi < c_lo or lo > c_hi:
             plausible = False
             reason = f"implied celerity [{lo:.2f}, {hi:.2f}] m/s outside physical band"
 

@@ -1,7 +1,7 @@
 """Minimal cached HTTP client (stdlib only) for the USGS services.
 
 Every raw response is cached on disk so the whole pipeline is re-runnable
-offline (spec 10).
+offline.
 """
 
 from __future__ import annotations
