@@ -1,4 +1,4 @@
-"""Additive extensions required by the river-discharge application (spec 6.1).
+"""Extensions used by the river-discharge application.
 
 Nothing here modifies the behaviour of `certificate.py` or
 `certificate_estimator.py`; the simulation experiments in `experiments/` are
@@ -6,8 +6,7 @@ unaffected.
 
 Added:
   * `PerVariableQuantileBall` -- an l_infty safeguard with per-variable
-    quantiles, which is what "each safeguard gauge below its own 90th
-    percentile" actually means.
+    quantiles: each safeguard coordinate below its own marginal quantile.
   * `TailCertificateEstimator` -- absolute threshold path (a level v in
     physical units) plus the `"trimmed"` estimator type.
 """
@@ -29,7 +28,7 @@ from certification_estimators.certificate_estimator import CertificateEstimator
 class PerVariableQuantileBall(CompactSet):
     """S = { w : |w_j| < Q_{q}(|W_j|) for every j }.
 
-    Semantics note (spec 6.2). The existing `QuantileBall` with
+    The existing `QuantileBall` with
     `norm="l_infty"` takes the quantile of the *aggregated* norm
     max_j |W_j|, i.e. a single scalar radius applied to every coordinate. When
     the safeguard gauges have very different scales -- which is always the case
@@ -38,8 +37,7 @@ class PerVariableQuantileBall(CompactSet):
     effectively unconstrained. This class instead thresholds each coordinate at
     its own marginal quantile, which is the semantics we want for the
     application and the one stated in the paper ("all safeguard variables
-    individually non-extreme"). `QuantileBall` is left untouched and is still
-    reported as a robustness check.
+    individually non-extreme"). `QuantileBall` is left untouched.
     """
 
     quantile: float

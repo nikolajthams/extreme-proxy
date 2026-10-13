@@ -86,4 +86,14 @@ class Certificate:
 
         return self.certified_subset(df, tau)
 
+    def top_k_certified_subset(self, df: pl.DataFrame, k: int) -> pl.DataFrame:
+        """The k observations with the largest |E| among those with the safeguard in its set,
+        in decreasing order of |E| (a stable sort, so the result is reproducible)."""
+        self._check_names_valid(df)
+        return (
+            df.filter(self.safeguard.is_bounded)
+            .sort(pl.col(self.e).abs(), descending=True, maintain_order=True)
+            .head(k)
+        )
+
 

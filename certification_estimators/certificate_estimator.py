@@ -20,12 +20,16 @@ class CertificateEstimator(AbstractEstimator):
         self.certification_quantile = certification_quantile
         self.estimator_type = estimator_type
 
+    def certified_subset(self, data: pl.DataFrame) -> pl.DataFrame:
+        """The certified observations: E above its `certification_quantile` among the
+        observations with the safeguard in its set."""
+        return Certificate(e=self.e, safeguard=self.safeguard).quantile_certified_subset(data, quantile=self.certification_quantile)
+
     def fit(self, data: pl.DataFrame | pd.DataFrame | np.ndarray, names: list[str] | None = None, demean: bool=False) -> np.ndarray:
         data = self.prepare_data(data, names)
         if demean:
             data = demean_data(data)
-        certified_subset = Certificate(e=self.e, safeguard=self.safeguard).quantile_certified_subset(data, quantile=self.certification_quantile)
-        beta = self.fit_on_certified_subset(certified_subset)
+        beta = self.fit_on_certified_subset(self.certified_subset(data))
 
         return beta
 
@@ -62,3 +66,20 @@ class CertificateEstimator(AbstractEstimator):
         return beta
 
 
+
+
+class TopKCertificateEstimator(CertificateEstimator):
+    """`CertificateEstimator` whose certified observations are the `n_certified` observations
+    with the largest |E| among those with the safeguard in its set, rather than those above a
+    fixed quantile of E. Keeping the number of certified observations fixed as n grows sends
+    the certification threshold to infinity at the rate n^{1/alpha}, which is what the
+    convergence rates of the paper's estimation section require; with a fixed quantile the
+    certified sample grows in proportion to n and the bias of order 1/threshold never vanishes.
+    Used by the simulation experiments of the paper (`experiments/iv_and_proxy.py`)."""
+
+    def __init__(self, e: str, safeguard: CompactSet, x: str, y: str, n_certified: int, estimator_type: CertificateEstimatorType="ols"):
+        super().__init__(e, safeguard, x, y, certification_quantile=float("nan"), estimator_type=estimator_type)
+        self.n_certified = n_certified
+
+    def certified_subset(self, data: pl.DataFrame) -> pl.DataFrame:
+        return Certificate(e=self.e, safeguard=self.safeguard).top_k_certified_subset(data, self.n_certified)
