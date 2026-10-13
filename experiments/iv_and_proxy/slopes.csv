@@ -1,0 +1,23 @@
+design,estimator,tail_index,slope,minus_one_over_alpha
+invalid_iv,2SLS,1.5,0.0030471037585353554,-0.6666666666666666
+invalid_iv,2SLS,2.5,0.0027534098487322143,-0.4
+invalid_iv,certified OLS,1.5,-0.6642306522605365,-0.6666666666666666
+invalid_iv,certified OLS,2.5,-0.4080098742623952,-0.4
+invalid_iv,"certified OLS, disqualified pair",1.5,-0.016755588010681277,-0.6666666666666666
+invalid_iv,"certified OLS, disqualified pair",2.5,-0.36716319352995114,-0.4
+linear_proxy,certified OLS,1.5,-0.6754704386428172,-0.6666666666666666
+linear_proxy,certified OLS,2.5,-0.4006686951258541,-0.4
+linear_proxy,proximal bridge,1.5,-0.5856538908685245,-0.6666666666666666
+linear_proxy,proximal bridge,2.5,-0.478974503400325,-0.4
+nonlinear_proxy,certified OLS,1.5,-1.319582284829195,-0.6666666666666666
+nonlinear_proxy,certified OLS,2.5,-0.8246140239185935,-0.4
+nonlinear_proxy,proximal bridge,1.5,0.0003107741910278848,-0.6666666666666666
+nonlinear_proxy,proximal bridge,2.5,-0.0004631407307909663,-0.4
+nonlinear_proxy,"proximal bridge, correctly specified",1.5,-1.196323014742632,-0.6666666666666666
+nonlinear_proxy,"proximal bridge, correctly specified",2.5,-0.7437208910416145,-0.4
+nonlinear_proxy,"proximal bridge, correctly specified (double precision)",1.5,2.384644435085862,-0.6666666666666666
+nonlinear_proxy,"proximal bridge, correctly specified (double precision)",2.5,-0.7434417816386074,-0.4
+valid_iv,2SLS,1.5,-0.6398832392589147,-0.6666666666666666
+valid_iv,2SLS,2.5,-0.5058656220982859,-0.4
+valid_iv,certified OLS,1.5,-0.6999439879137268,-0.6666666666666666
+valid_iv,certified OLS,2.5,-0.39279168280249616,-0.4
