@@ -12,12 +12,9 @@ from pathlib import Path
 CFS_TO_CUMECS = 0.028316846592  # ft^3/s -> m^3/s
 SQMI_TO_SQKM = 2.589988110336
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-CACHE_DIR = REPO_ROOT / "hydro" / "cache"
-OUTPUT_DIR = REPO_ROOT / "experiments" / "river_discharge"
-NOTES_DIR = REPO_ROOT.parent / "notes"
-NOTES_FIG_DIR = NOTES_DIR / "Figures" / "application"
-NOTES_TABLE_DIR = NOTES_DIR / "sections" / "Appendices"
+HYDRO_DIR = Path(__file__).resolve().parent
+CACHE_DIR = HYDRO_DIR / "cache"      # every USGS response, versioned: the pipeline runs offline
+OUTPUT_DIR = HYDRO_DIR / "results"   # the parquets, figures and table of the application
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,6 @@ import polars as pl
 from hydro.config import CACHE_DIR, CFS_TO_CUMECS, SQMI_TO_SQKM
 from hydro.data.http import fetch, fetch_json, parse_rdb
 
-SITE_DIR = CACHE_DIR / "sites"
 DV_DIR = CACHE_DIR / "dv"
 
 DISCHARGE_PARAM = "00060"

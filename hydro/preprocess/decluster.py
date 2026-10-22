@@ -50,8 +50,3 @@ def runs_decluster(
         .sort(date_col)
     )
 
-
-def cluster_count(
-    df: pl.DataFrame, value_col: str, threshold: float, run_length_days: int
-) -> int:
-    return runs_decluster(df, value_col, threshold, run_length_days).height

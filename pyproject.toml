@@ -1,27 +1,28 @@
 [project]
-name = "certification-estimators"
-version = "0.1.0"
-description = "Add your description here"
+name = "extreme-proxy"
+version = "1.0.0"
+description = "Code for 'Extreme proxies for causal identification: deconfounding with outliers' (Bodik and Thams)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "graphical-toolbox",
-    "plotly>=6.8.0",
-    "plotly-express>=0.4.1",
-    "tikzplotly>=0.2.2",
+    "networkx>=3.5",
+    "numpy>=2.3",
+    "polars>=1.40",
+    "tqdm>=4.67",
 ]
 
-[tool.uv.sources]
-graphical-toolbox = { path = "../../../software/graphical-toolbox", editable = true }
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[dependency-groups]
-dev = [
-    "pytest>=9.1.1",
-]
-
 [tool.hatch.build.targets.wheel]
-packages = ["certification_estimators"]
+packages = ["certification_estimators", "hydro"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

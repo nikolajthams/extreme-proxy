@@ -1,25 +1,36 @@
+"""The certifying event of a source-safeguard pair (E, S).
+
+A certificate selects the observations whose source E exceeds a threshold v
+while the safeguard variables S lie in a compact set B, the event
+A_v = {E > v, S in B} of the paper. The set B is a quantile ball of the
+safeguard, so that it is fixed by the data alone.
+"""
+
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Literal
 
 import polars as pl
-
-Norm = Literal["l1", "l2", "l_infty"]
 
 
 @dataclass
 class CompactSet(ABC):
+    """A set B for the safeguard, as a polars expression that is true on the
+    observations with S in B."""
+
     variables: list[str]
 
     @property
     @abstractmethod
-    def is_bounded(self) -> pl.Expr:
-       pass
+    def is_bounded(self) -> pl.Expr: ...
 
 
 @dataclass
 class Unrestricted(CompactSet):
-    """The empty safeguard S = {}, i.e. no restriction. Used for the valid-IV anchor E = Z."""
+    """The empty safeguard S = {}: no restriction, as for the pair (Z, {}) of
+    the valid-instrument design."""
+
     variables: list[str] = field(default_factory=list)
 
     @property
@@ -28,72 +39,61 @@ class Unrestricted(CompactSet):
 
 
 @dataclass
-class Ball(CompactSet): 
-    radius: float
-    norm: Norm = "l1"
+class QuantileBall(CompactSet):
+    """The l1-ball {s : ||s||_1 < r} whose radius r is the `quantile` of
+    ||S||_1 over all observations (the simulations: the 10% quantile)."""
+
+    quantile: float
 
     @property
     def is_bounded(self) -> pl.Expr:
-       if self.norm == "l1":
-          return pl.sum_horizontal(pl.col(v).abs() for v in self.variables) < self.radius
-       elif self.norm == "l2":
-          return pl.sum_horizontal(pl.col(v) ** 2 for v in self.variables).sqrt() < self.radius
-       elif self.norm == "l_infty":
-          return pl.max_horizontal(pl.col(v).abs() for v in self.variables) < self.radius
-       else:
-          raise RuntimeError(f"Norm {self.norm} not supported")
+        norm = pl.sum_horizontal(pl.col(v).abs() for v in self.variables)
+        return norm < norm.quantile(self.quantile)
+
 
 @dataclass
-class QuantileBall(CompactSet): 
+class PerVariableQuantileBall(CompactSet):
+    """{s : |s_j| < Q_q(|S_j|) for every j}: every safeguard variable below its
+    own `quantile` (the application, whose proxy gauges differ in scale by an
+    order of magnitude, so that a single radius would be set by the largest)."""
+
     quantile: float
-    norm: Norm = "l1"
 
     @property
     def is_bounded(self) -> pl.Expr:
-        if self.norm == "l1":
-            expr = pl.sum_horizontal(pl.col(v).abs() for v in self.variables)
-        elif self.norm == "l2":
-            expr = pl.sum_horizontal(pl.col(v) ** 2 for v in self.variables).sqrt()
-        elif self.norm == "l_infty":
-            expr = pl.max_horizontal(pl.col(v).abs() for v in self.variables)
-        else:
-            raise RuntimeError(f"Norm {self.norm} not supported")
+        if not self.variables:
+            return pl.lit(True)
+        return pl.all_horizontal(
+            pl.col(v).abs() < pl.col(v).abs().quantile(self.quantile) for v in self.variables
+        )
 
-        return expr < expr.quantile(self.quantile)
 
 class Certificate:
-    def __init__(
-            self,
-            e: str,
-            safeguard: CompactSet,
-            ):
-       self.e = e
-       self.safeguard = safeguard
+    """The certifying events of the pair (E, S) with the safeguard set B.
 
-    def _check_names_valid(self, df: pl.DataFrame) -> None:
-        required = {self.e, *self.safeguard.variables}
-        missing = required - set(df.columns)
-        assert not missing, f"Not all columns present in the data. Missing columns: {missing}"
+    The source enters through |E|; every source of the paper is non-negative,
+    so the certified subset is {E > v, S in B}."""
 
-    def certified_subset(self, df: pl.DataFrame, tau: float) -> pl.DataFrame:
-        self._check_names_valid(df)
+    def __init__(self, e: str, safeguard: CompactSet):
+        self.e = e
+        self.safeguard = safeguard
 
-        return df.filter((pl.col(self.e).abs() > tau) & self.safeguard.is_bounded)
+    def _check_columns(self, df: pl.DataFrame) -> None:
+        missing = {self.e, *self.safeguard.variables} - set(df.columns)
+        if missing:
+            raise KeyError(f"columns missing from the data: {sorted(missing)}")
 
-    def quantile_certified_subset(self, df: pl.DataFrame, quantile: float) -> pl.DataFrame:
-        self._check_names_valid(df)
-        tau = df.filter(self.safeguard.is_bounded).select(pl.col(self.e).abs().quantile(quantile)).item()
-
-        return self.certified_subset(df, tau)
+    def certified_subset(self, df: pl.DataFrame, v: float) -> pl.DataFrame:
+        """The observations with |E| > v and S in B."""
+        self._check_columns(df)
+        return df.filter((pl.col(self.e).abs() > v) & self.safeguard.is_bounded)
 
     def top_k_certified_subset(self, df: pl.DataFrame, k: int) -> pl.DataFrame:
-        """The k observations with the largest |E| among those with the safeguard in its set,
-        in decreasing order of |E| (a stable sort, so the result is reproducible)."""
-        self._check_names_valid(df)
+        """The k observations with the largest |E| among those with S in B, in
+        decreasing order of |E| (a stable sort, so the result is reproducible)."""
+        self._check_columns(df)
         return (
             df.filter(self.safeguard.is_bounded)
             .sort(pl.col(self.e).abs(), descending=True, maintain_order=True)
             .head(k)
         )
-
-

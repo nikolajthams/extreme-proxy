@@ -1,25 +1,22 @@
-"""Tests for experiments/combine_estimators.py: the split of the sample at the
-certification threshold, the bridge against the toolbox's LinearProximal, the
-least-squares pieces, the precision weight, and the reproducibility of a
-replication."""
+"""Tests of simulations/combine_estimators.py: the split of the sample at the
+certification threshold, the bridge against `LinearProximal`, the
+least-squares pieces, the precision weight, the reproducibility of a
+repetition, and the stored estimates."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import polars as pl
+import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
-
-import combine_estimators as ce  # noqa: E402
+from certification_estimators.baselines import LinearProximal
+from simulations import combine_estimators as ce
 
 
 def _data(n: int = 5000, seed: int = 0, tail_index: float = 2.5) -> pl.DataFrame:
     rng = np.random.default_rng(seed)
     dag = (ce.ParetoDag.from_dag(ce.PROXY)
-           .sample_coefficients(lower=0.2, upper=1.0, two_sided=False, rng=rng)
+           .sample_coefficients(*ce.COEFFICIENT_RANGE, rng=rng)
            .set_edge_strength(ce.TREATMENT, ce.OUTCOME, ce.TRUE_BETA))
     return dag.sample(n=n, tail_index=tail_index, rng=rng)
 
@@ -43,12 +40,10 @@ def test_split_certifies_k_observations_above_the_threshold_and_the_body_below()
     assert certified.height + body.height + uncertified_tail.height == data.height - 1
 
 
-def test_bridge_matches_the_toolbox_point_estimate():
-    from graphical_toolbox.models.proximal import LinearProximal
-
+def test_bridge_matches_the_linear_proximal_point_estimate():
     data = _data()
     beta, var = ce.proximal_bridge(data)
-    reference = float(np.asarray(LinearProximal(ce.TREATMENT, ce.OUTCOME, "Z", "W").fit(data)).reshape(-1)[0])
+    reference = LinearProximal(ce.TREATMENT, ce.OUTCOME, "Z", "W").fit(data)
     assert abs(beta - reference) < 1e-8 * max(1.0, abs(reference))
     assert var > 0
 
@@ -100,3 +95,15 @@ def test_summary_and_table():
     for label in ce.TABULATED:
         assert label in body
     assert ce.BRIDGE_ALL not in body and "median weight on the bridge" in body
+
+
+@pytest.mark.skipif(not (ce.OUTPUT / "estimates.parquet").exists(), reason="stored estimates not present")
+def test_stored_estimates_are_reproduced():
+    """The first cell of repetition 0 consumes the random stream before any other cell."""
+    tail_index, n = ce.TAIL_INDICES[0], ce.SAMPLE_SIZES[0]
+    stored = pl.read_parquet(ce.OUTPUT / "estimates.parquet").filter(
+        (pl.col("repetition") == 0) & (pl.col("tail_index") == tail_index) & (pl.col("sample_size") == n)
+    ).row(0, named=True)
+    fresh = ce.run_repetition(0, sample_sizes=[n], tail_indices=[tail_index])[0]
+    for key in ("threshold", "certified", "bridge_body", "combined", "bridge_all", "weight"):
+        assert fresh[key] == pytest.approx(stored[key], rel=1e-9)

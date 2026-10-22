@@ -3,19 +3,15 @@ double-precision proximal estimator wherever the latter is well conditioned."""
 
 from __future__ import annotations
 
-import sys
 from fractions import Fraction
-from pathlib import Path
 
 import numpy as np
 import polars as pl
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
-
-from exact_iv import ExactQuadraticProximal, exact_dot, exact_iv, solve_exact  # noqa: E402
-from graphical_toolbox.generate_data.dag import NonlinearParetoDag  # noqa: E402
-from graphical_toolbox.models.proximal import LinearProximal  # noqa: E402
-from certification_estimators.classical_graphs import PROXY  # noqa: E402
+from certification_estimators.baselines import LinearProximal
+from certification_estimators.dag import NonlinearParetoDag
+from certification_estimators.graphs import PROXY
+from simulations.exact_iv import ExactQuadraticProximal, exact_dot, exact_iv, solve_exact
 
 
 def test_exact_dot_matches_fraction_arithmetic():
@@ -55,12 +51,12 @@ def test_exact_quadratic_bridge_agrees_with_lstsq_when_well_conditioned():
     rng = np.random.default_rng(2)
     dag = (
         NonlinearParetoDag.from_dag(PROXY)
-        .sample_coefficients(lower=0.2, upper=1.0, two_sided=False, rng=rng)
+        .sample_coefficients(0.2, 1.0, rng=rng)
         .set_edge_strength("X", "Y", 1.0)
     )
     data = dag.sample(n=10_000, tail_index=2.5, rng=rng)
     augmented = data.with_columns((pl.col("W") ** 2).alias("W2"), (pl.col("Z") ** 2).alias("Z2"))
-    float64 = LinearProximal("X", "Y", ["Z", "Z2"], ["W", "W2"]).fit(augmented).item()
+    float64 = LinearProximal("X", "Y", ["Z", "Z2"], ["W", "W2"]).fit(augmented)
     exact = ExactQuadraticProximal("X", "Y", "Z", "W").fit(data)
     assert abs(exact - float64) < 1e-6 * max(1.0, abs(exact))
     assert abs(exact - 1.0) < 0.05

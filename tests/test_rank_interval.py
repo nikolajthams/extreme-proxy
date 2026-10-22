@@ -1,15 +1,18 @@
-"""Tests of the rank-based confidence interval on a certified sample."""
+"""Tests of the rank-based confidence interval on a certified sample, and of
+the stored coverage simulation."""
 
 from __future__ import annotations
 
 from math import comb, factorial
 
 import numpy as np
+import polars as pl
 import pytest
 
 from certification_estimators.rank_interval import (
     cutoff, exact_level, inversion_counts, kendall_statistic, rank_interval,
 )
+from simulations import rank_interval as sim
 
 
 def test_inversion_counts_are_the_mahonian_numbers():
@@ -50,7 +53,7 @@ def test_coverage_under_independence_equals_the_exact_level():
     rng = np.random.default_rng(2)
     k, reps = 7, 4000
     r, level = cutoff(k, 0.1)
-    hits = sum(rank_interval(rng.pareto(1.5, k) + 1, 2.0 * 0 + rng.standard_t(2, k), 0.1).covers(0.0)
+    hits = sum(rank_interval(rng.pareto(1.5, k) + 1, rng.standard_t(2, k), 0.1).covers(0.0)
                for _ in range(reps))
     assert hits / reps == pytest.approx(1 - level, abs=0.02)
 
@@ -61,3 +64,20 @@ def test_ties_in_t_are_broken_at_random_and_reproducibly():
     a, b = rank_interval(t, y, 0.1), rank_interval(t, y, 0.1)
     assert a == b and np.isfinite([a.lo, a.hi]).all()
     assert rank_interval([1.0, 2.0, 3.0], [1.0, 2.0, 3.0], 0.1) is None
+
+
+@pytest.mark.skipif(not (sim.OUTPUT / "estimates.parquet").exists(), reason="stored estimates not present")
+def test_stored_coverage_simulation_is_reproduced():
+    """The first cell of repetition 0 consumes the random stream before any other cell."""
+    design, n = sim.DESIGNS[0], sim.SAMPLE_SIZES[0]
+    stored = pl.read_parquet(sim.OUTPUT / "estimates.parquet").filter(
+        (pl.col("repetition") == 0) & (pl.col("design") == design.key)
+        & (pl.col("tail_index") == design.tail_indices[0]) & (pl.col("sample_size") == n)
+    ).sort(["k", "gamma"])
+    fresh = sim.run_repetition(0, sample_sizes=[n], designs=[design])
+    fresh = [r for r in fresh if r["tail_index"] == design.tail_indices[0]]
+    assert len(fresh) == stored.height == len(sim.CERTIFIED_SIZES) * len(sim.LEVELS)
+    for r, s in zip(sorted(fresh, key=lambda r: (r["k"], r["gamma"])), stored.to_dicts()):
+        assert (r["k"], r["gamma"]) == (s["k"], s["gamma"])
+        for key in ("lo", "hi", "certified_ols"):
+            assert r[key] == pytest.approx(s[key], rel=1e-9)

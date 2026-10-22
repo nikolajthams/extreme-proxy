@@ -9,8 +9,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from certification_estimators.certificate import QuantileBall, Unrestricted
-from certification_estimators.extensions import PerVariableQuantileBall
+from certification_estimators.certificate import PerVariableQuantileBall, QuantileBall, Unrestricted
 from hydro import estimation as est
 from hydro.config import CONFIG, Alignment, OUTPUT_DIR
 from hydro.data.network import Network
@@ -74,10 +73,10 @@ def test_runs_decluster_counts_and_peaks():
 
 
 def test_per_variable_quantile_ball_bounds_each_coordinate():
-    # P0 is 100x the scale of P1: an aggregated l_infty radius is set by P0
-    # and leaves P1 unconstrained; the per-variable ball does not.
+    # P0 is 100x the scale of P1: the radius of a ball of the aggregated norm is
+    # set by P0 and leaves P1 unconstrained; the per-variable ball does not.
     df = pl.DataFrame({"P0": 100 * RNG.random(500), "P1": RNG.random(500)})
-    agg = df.filter(QuantileBall(["P0", "P1"], 0.5, "l_infty").is_bounded)
+    agg = df.filter(QuantileBall(["P0", "P1"], 0.5).is_bounded)
     per = df.filter(PerVariableQuantileBall(["P0", "P1"], 0.5).is_bounded)
     assert agg["P1"].max() > per["P1"].max()
     assert per["P0"].max() < df["P0"].quantile(0.5) + 1e-9
@@ -168,8 +167,8 @@ def test_drop_nested_keeps_the_downstream_gauge_and_order():
 
 @pytest.mark.skipif(not (OUTPUT_DIR / "pairs.parquet").exists(), reason="pipeline outputs not present")
 def test_headline_pair_reproduces_from_the_cache():
-    """The headline pair's panel and naive OLS rebuilt from the cached USGS
-    data equal the persisted values."""
+    """The headline pair's panel, naive OLS, bridge and certified OLS rebuilt
+    from the cached USGS data equal the persisted values."""
     from hydro.pairs import headline_pair, panel_for
 
     row = headline_pair()
@@ -178,6 +177,8 @@ def test_headline_pair_reproduces_from_the_cache():
     d = pl.read_parquet(OUTPUT_DIR / "all_pairs.parquet").filter(pl.col("pair") == row["pair"])
     naive = d.filter(pl.col("method") == "naive OLS")["beta"][0]
     assert est.naive_ols(panel.daily) == pytest.approx(naive)
+    bridge = d.filter(pl.col("method") == "proximal bridge")["beta"][0]
+    assert est.proximal_bridge(panel.daily, panel.p_cols) == pytest.approx(bridge)
     c = d.filter((pl.col("method") == "certified OLS") & (pl.col("q_p") == CONFIG.estimator.q_p)).row(0, named=True)
     f = est.fit_at_operating_point(panel.daily, panel.p_cols, CONFIG.estimator.q_p, est.OLS)
     assert f.n_cert == c["n_cert"] and f.beta == pytest.approx(c["beta"])
