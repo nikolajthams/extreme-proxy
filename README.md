@@ -4,7 +4,7 @@ Code and data for the paper *Extreme proxies for causal identification:
 deconfounding with outliers* by Juraj Bodik and Nikolaj Thams. Everything
 in the paper that is computed, the simulations of Section 6, the
 confidence-interval and combining appendices and the river-discharge
-application of Section 7, is reproduced from this repository.
+application of Section 7, can be reproduced from this repository.
 
 ## Layout
 
